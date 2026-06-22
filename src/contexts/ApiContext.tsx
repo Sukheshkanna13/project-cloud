@@ -28,6 +28,7 @@ export const useApi = () => {
 export const ApiProvider = ({ children }: { children: ReactNode }) => {
   const [config, setConfig] = useState<ApiConfig>(() => {
     const defaultEnvKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+    const defaultReadEndpoint = import.meta.env.VITE_READ_ENDPOINT || '';
     const saved = localStorage.getItem('urbanNoiseConfig');
     if (saved) {
       try {
@@ -36,13 +37,16 @@ export const ApiProvider = ({ children }: { children: ReactNode }) => {
         if (!parsed.googleMapsApiKey) {
           parsed.googleMapsApiKey = defaultEnvKey;
         }
+        if (!parsed.readEndpoint) {
+          parsed.readEndpoint = defaultReadEndpoint;
+        }
         return parsed;
       } catch {
         // Fall through to defaults
       }
     }
     return {
-      readEndpoint: '',
+      readEndpoint: defaultReadEndpoint,
       predictEndpoint: 'https://hnwl6n3tq1.execute-api.us-east-2.amazonaws.com/dev/predict',
       pollingInterval: 30000,
       googleMapsApiKey: defaultEnvKey,

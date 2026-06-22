@@ -46,6 +46,18 @@ const Navbar = () => {
             </Link>
 
             <Link
+              to="/test-feed"
+              className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                isActive('/test-feed')
+                  ? 'text-blue-600 bg-blue-50'
+                  : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+              }`}
+            >
+              <Radio className="w-4 h-4" />
+              <span>Test Feed</span>
+            </Link>
+
+            <Link
               to="/admin"
               className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
                 isActive('/admin')

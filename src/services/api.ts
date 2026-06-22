@@ -28,26 +28,51 @@ class ApiService {
     }
 
     try {
-      const response = await fetch(this.config.readEndpoint, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
+      // Append query params if they don't exist to reduce DynamoDB Read Unit usage
+      let fetchUrl = this.config.readEndpoint;
+      if (!fetchUrl.includes('?')) {
+        fetchUrl += '?node_id=ESP32-DEV-NODE&hours=24&limit=50';
+      }
+
+      const response = await fetch(fetchUrl, {
+        method: 'GET'
       });
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const rawData = await response.json();
+      
+      let items: any[] = [];
+      // Handle different response shapes
+      if (Array.isArray(rawData)) {
+        items = rawData;
+      } else if (rawData.data && Array.isArray(rawData.data)) {
+        items = rawData.data;
+      } else if (rawData.body) {
+        const parsed = typeof rawData.body === 'string' ? JSON.parse(rawData.body) : rawData.body;
+        items = Array.isArray(parsed) ? parsed : [];
+      }
 
-      // Handle different response shapes — array directly or wrapped in body
-      if (Array.isArray(data)) {
-        return data as NoiseRecord[];
-      }
-      if (data.body) {
-        const parsed = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
-        return Array.isArray(parsed) ? parsed : [];
-      }
-      return [];
+      // Normalize each record to the internal NoiseRecord shape:
+      //  - map 'lng' → 'lon'
+      //  - coerce coordinates to numbers
+      //  - normalize confidence to a 0–1 fraction (API may send 0–100)
+      return items.map((item: any) => {
+        const rawConfidence = Number(item.confidence);
+        const confidence = !isFinite(rawConfidence)
+          ? 0.5
+          : rawConfidence > 1
+          ? Math.min(rawConfidence / 100, 1)
+          : rawConfidence;
+        return {
+          ...item,
+          lat: Number(item.lat),
+          lon: Number(item.lon !== undefined ? item.lon : item.lng),
+          confidence,
+        };
+      }) as NoiseRecord[];
     } catch (error) {
       console.error('Failed to fetch noise data:', error);
       throw error;
@@ -66,9 +91,11 @@ class ApiService {
 
     try {
       const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.wav');
-      formData.append('latitude', String(lat));
-      formData.append('longitude', String(lon));
+      formData.append('file', audioBlob, 'recording.wav');
+      // The predict Lambda persists the coordinate fields named `lat`/`lon`.
+      // Sending `latitude`/`longitude` makes it store 0,0 in DynamoDB.
+      formData.append('lat', String(lat));
+      formData.append('lon', String(lon));
       formData.append('timestamp', new Date().toISOString());
 
       const response = await fetch(this.config.predictEndpoint, {

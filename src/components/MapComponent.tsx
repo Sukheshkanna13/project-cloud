@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApi } from '../contexts/ApiContext';
 import { NoiseRecord } from '../types';
+import { createHeatmapOverlay, HeatmapOverlay } from '../lib/heatmapOverlay';
 import './MapStyles.css';
 
-// Chennai, India — default center
-const CHENNAI_CENTER = { lat: 13.0827, lng: 80.2707 };
+// VIT Chennai campus — default center
+const CHENNAI_CENTER = { lat: 12.8406, lng: 80.1534 };
+const DEFAULT_ZOOM = 15;
 
 declare global {
   interface Window {
@@ -16,7 +18,7 @@ declare global {
 const MapComponent = () => {
   const mapRef = useRef<HTMLDivElement>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
-  const heatmapRef = useRef<google.maps.visualization.HeatmapLayer | null>(null);
+  const heatmapRef = useRef<HeatmapOverlay | null>(null);
   const markersRef = useRef<google.maps.Marker[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [mapError, setMapError] = useState<string | null>(null);
@@ -37,7 +39,7 @@ const MapComponent = () => {
 
       googleMapRef.current = new window.google.maps.Map(mapRef.current, {
         center: CHENNAI_CENTER,
-        zoom: 12,
+        zoom: DEFAULT_ZOOM,
         styles: [
           { featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] },
         ],
@@ -67,7 +69,7 @@ const MapComponent = () => {
     if (!existingScript) {
       const script = document.createElement('script');
       script.id = 'google-maps-script';
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${config.googleMapsApiKey}&libraries=visualization,places&callback=urbannoise_init_google_maps`;
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${config.googleMapsApiKey}&loading=async&callback=urbannoise_init_google_maps`;
       script.async = true;
       script.defer = true;
       script.onerror = () => {
@@ -94,71 +96,84 @@ const MapComponent = () => {
     }
   }, [config.googleMapsApiKey]);
 
-  // Update heatmap and markers when data changes
+  // Update heatmap and markers when data changes.
+  // Wrapped in try/catch so a single bad point can never white-screen the app.
   useEffect(() => {
     if (!googleMapRef.current || !window.google?.maps) return;
 
-    // ── Clear existing ──
-    if (heatmapRef.current) {
-      heatmapRef.current.setMap(null);
-    }
-    markersRef.current.forEach(m => m.setMap(null));
-    markersRef.current = [];
+    try {
+      // ── Clear existing markers ──
+      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current = [];
 
-    if (noiseData.length === 0) return;
+      // Filter valid data points. Reject (0,0) — that's the "null island" the
+      // backend stores when coordinates are missing, not a real sensor location.
+      const validData = noiseData.filter(point =>
+        point &&
+        typeof point.lat === 'number' && !isNaN(point.lat) &&
+        typeof point.lon === 'number' && !isNaN(point.lon) &&
+        !(point.lat === 0 && point.lon === 0)
+      );
 
-    // ── Heatmap layer ──
-    const heatmapData = noiseData.map(point => ({
-      location: new google.maps.LatLng(point.lat, point.lon),
-      weight: point.confidence || 0.5,
-    }));
+      // ── Heatmap overlay (custom canvas — HeatmapLayer was removed in v3.65) ──
+      const heatPoints = validData.map(point => ({
+        lat: point.lat,
+        lng: point.lon,
+        weight: normalizeConfidence(point.confidence),
+      }));
 
-    if (google.maps.visualization) {
-      heatmapRef.current = new google.maps.visualization.HeatmapLayer({
-        data: heatmapData,
-        map: googleMapRef.current,
-        gradient: [
-          'rgba(0, 255, 0, 0)',
-          'rgba(0, 255, 0, 1)',
-          'rgba(173, 255, 47, 1)',
-          'rgba(255, 255, 0, 1)',
-          'rgba(255, 165, 0, 1)',
-          'rgba(255, 69, 0, 1)',
-          'rgba(255, 0, 0, 1)',
-        ],
-        opacity: 0.75,
-        radius: 40,
+      if (!heatmapRef.current) {
+        heatmapRef.current = createHeatmapOverlay(heatPoints, { radius: 40, opacity: 0.75 });
+        heatmapRef.current.setMap(googleMapRef.current);
+      } else {
+        heatmapRef.current.setPoints(heatPoints);
+      }
+
+      if (validData.length === 0) return;
+
+      // ── Markers ──
+      validData.forEach(point => {
+        try {
+          const marker = new google.maps.Marker({
+            position: { lat: point.lat, lng: point.lon },
+            map: googleMapRef.current,
+            title: `${point.label} — ${point.node_id}`,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 7,
+              fillColor: getColor(normalizeConfidence(point.confidence)),
+              fillOpacity: 0.85,
+              strokeColor: '#fff',
+              strokeWeight: 2,
+            },
+          });
+
+          marker.addListener('click', () => setSelectedPoint(point));
+          markersRef.current.push(marker);
+        } catch (err) {
+          console.error('Failed to create marker for point:', point, err);
+        }
       });
-    }
 
-    // ── Markers ──
-    noiseData.forEach(point => {
-      const marker = new google.maps.Marker({
-        position: { lat: point.lat, lng: point.lon },
-        map: googleMapRef.current,
-        title: `${point.label} — ${point.node_id}`,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 7,
-          fillColor: getColor(point.confidence),
-          fillOpacity: 0.85,
-          strokeColor: '#fff',
-          strokeWeight: 2,
-        },
-      });
+      // Auto-fit bounds, but only to points near the configured campus center
+      // (~12 km box). This keeps the view framed on VIT Chennai and ignores
+      // far-away outliers/stale test records that would otherwise zoom the map
+      // out across the whole region.
+      const nearCampus = validData.filter(
+        p => Math.abs(p.lat - CHENNAI_CENTER.lat) < 0.1 && Math.abs(p.lon - CHENNAI_CENTER.lng) < 0.1
+      );
+      const fitTarget = nearCampus.length > 0 ? nearCampus : validData;
 
-      marker.addListener('click', () => setSelectedPoint(point));
-      markersRef.current.push(marker);
-    });
-
-    // Auto-fit bounds to data
-    if (noiseData.length > 1) {
-      const bounds = new google.maps.LatLngBounds();
-      noiseData.forEach(p => bounds.extend({ lat: p.lat, lng: p.lon }));
-      googleMapRef.current.fitBounds(bounds);
-    } else if (noiseData.length === 1) {
-      googleMapRef.current.setCenter({ lat: noiseData[0].lat, lng: noiseData[0].lon });
-      googleMapRef.current.setZoom(14);
+      if (fitTarget.length > 1) {
+        const bounds = new google.maps.LatLngBounds();
+        fitTarget.forEach(p => bounds.extend({ lat: p.lat, lng: p.lon }));
+        googleMapRef.current.fitBounds(bounds);
+      } else if (fitTarget.length === 1) {
+        googleMapRef.current.setCenter({ lat: fitTarget[0].lat, lng: fitTarget[0].lon });
+        googleMapRef.current.setZoom(DEFAULT_ZOOM);
+      }
+    } catch (err) {
+      console.error('Failed to render map data:', err);
     }
   }, [noiseData]);
 
@@ -254,6 +269,14 @@ const MapComponent = () => {
     </div>
   );
 };
+
+// The /dashboard API may return confidence as a percentage (0–100) or a
+// fraction (0–1). Normalize everything the map consumes to a 0–1 fraction.
+function normalizeConfidence(confidence: number): number {
+  const c = Number(confidence);
+  if (!isFinite(c) || c <= 0) return 0.5;
+  return c > 1 ? Math.min(c / 100, 1) : c;
+}
 
 function getColor(confidence: number): string {
   if (confidence > 0.8) return '#10B981';

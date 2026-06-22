@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Mic, MicOff, Upload, Loader, MapPin, CheckCircle } from 'lucide-react';
 import { apiService } from '../services/api';
+import { encodeWavFromBlob } from '../lib/wavEncoder';
 import { useApi } from '../contexts/ApiContext';
 
 const AudioCapture = () => {
@@ -116,22 +117,47 @@ const AudioCapture = () => {
     setError(null);
 
     try {
-      const response = await apiService.sendPrediction(audioBlob, location.lat, location.lon);
+      // MediaRecorder gives us WebM/Opus; the predict Lambda needs real WAV.
+      // Convert before upload or every recording comes back as processing_error.
+      let wavBlob: Blob;
+      try {
+        wavBlob = await encodeWavFromBlob(audioBlob);
+      } catch {
+        throw new Error('Could not process the recording audio. Please record again.');
+      }
+
+      const response = await apiService.sendPrediction(wavBlob, location.lat, location.lon);
       setResult(response);
       setAudioBlob(null);
 
-      // Parse response to add to local map immediately
-      const parsedRecord = {
-        node_id: 'local-browser',
-        timestamp: new Date().toISOString(),
-        confidence: Number(response.confidence) || 1.0,
+      // Parse response to add to local map immediately.
+      const metrics = (response.noise_metrics as any) || {};
+      const label = String(
+        metrics.label || response.predicted_class || response.label || 'Unknown'
+      );
+
+      // The endpoint returns confidence as a percentage (0–100); the rest of the
+      // app uses a 0–1 fraction, so normalize here to match the polling path.
+      const rawConfidence = Number(metrics.confidence);
+      const confidence = !isFinite(rawConfidence)
+        ? 0.5
+        : rawConfidence > 1
+        ? Math.min(rawConfidence / 100, 1)
+        : rawConfidence;
+
+      if (label === 'processing_error') {
+        setError('The server could not classify this recording. Try recording again in a quieter spot.');
+      }
+
+      addLocalRecord({
+        node_id: String(response.node_id || 'local-browser'),
+        timestamp: String(response.timestamp || new Date().toISOString()),
+        confidence,
         event_id: `local-${Date.now()}`,
-        label: String(response.predicted_class || response.label || 'Unknown'),
+        label,
         lat: location.lat,
         lon: location.lon,
-      };
-      
-      addLocalRecord(parsedRecord);
+      });
 
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
