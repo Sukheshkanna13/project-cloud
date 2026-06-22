@@ -1,98 +1,133 @@
 // src/services/api.ts
-import axios from 'axios';
-import { NoiseData, RouteData, UploadResponse, ApiConfig } from '../types';
+import { NoiseRecord, ApiConfig } from '../types';
+
+const DEFAULT_CONFIG: ApiConfig = {
+  readEndpoint: '',
+  predictEndpoint: 'https://hnwl6n3tq1.execute-api.us-east-2.amazonaws.com/dev/predict',
+  pollingInterval: 30000,
+  googleMapsApiKey: '',
+};
 
 class ApiService {
-  private config: ApiConfig = { baseUrl: '', apiKey: '' };
+  private config: ApiConfig = DEFAULT_CONFIG;
+  private pollingTimer: ReturnType<typeof setInterval> | null = null;
 
-  setConfig(config: ApiConfig) {
-    this.config = config;
+  setConfig(config: Partial<ApiConfig>) {
+    this.config = { ...this.config, ...config };
   }
 
-  // --- REAL HEATMAP FUNCTION ---
-  async getHeatmapData(timeRange: string = '24h'): Promise<NoiseData[]> {
-    if (!this.config.baseUrl) throw new Error('API Base URL is not configured.');
+  getConfig(): ApiConfig {
+    return { ...this.config };
+  }
+
+  // ── Read noise data from DynamoDB (via API Gateway GET endpoint) ──
+  async fetchNoiseData(): Promise<NoiseRecord[]> {
+    if (!this.config.readEndpoint) {
+      console.warn('DynamoDB read endpoint not configured');
+      return [];
+    }
 
     try {
-      // We will call the new /heatmap endpoint on our server
-      const url = `${this.config.baseUrl}/heatmap`;
-      console.log('Fetching heatmap data from:', url);
-      
-      const response = await axios.get(url);
-      
-      // The response.data will be a JSON string, so we parse it.
-      // This is because our Flask app uses json.dumps()
-      return JSON.parse(response.data);
+      const response = await fetch(this.config.readEndpoint, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
 
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Handle different response shapes — array directly or wrapped in body
+      if (Array.isArray(data)) {
+        return data as NoiseRecord[];
+      }
+      if (data.body) {
+        const parsed = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
+        return Array.isArray(parsed) ? parsed : [];
+      }
+      return [];
     } catch (error) {
-      console.error('Failed to fetch heatmap data:', error);
+      console.error('Failed to fetch noise data:', error);
       throw error;
     }
   }
 
-  // --- REAL UPLOAD FUNCTION ---
-  async uploadAudio(audioBlob: Blob, location: { lat: number; lng: number }): Promise<UploadResponse> {
-    if (!this.config.baseUrl) throw new Error('API Base URL is not configured.');
-    
+  // ── Send audio recording to predict endpoint ──
+  async sendPrediction(
+    audioBlob: Blob,
+    lat: number,
+    lon: number
+  ): Promise<Record<string, unknown>> {
+    if (!this.config.predictEndpoint) {
+      throw new Error('Predict endpoint not configured');
+    }
+
     try {
-      // 1. Create a FormData object to send the file
       const formData = new FormData();
-      
-      // 2. Add the audio file. The key 'audio' MUST match your Flask app.py
       formData.append('audio', audioBlob, 'recording.wav');
-      
-      // 3. Add the location data. These keys MUST match your Flask app.py
-      formData.append('latitude', String(location.lat));
-      formData.append('longitude', String(location.lng));
+      formData.append('latitude', String(lat));
+      formData.append('longitude', String(lon));
+      formData.append('timestamp', new Date().toISOString());
 
-      // 4. Send the request to the /predict endpoint
-      const url = `${this.config.baseUrl}/predict`;
-      console.log('Uploading audio to:', url);
-      
-      const response = await axios.post(url, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+      const response = await fetch(this.config.predictEndpoint, {
+        method: 'POST',
+        body: formData,
       });
-      
-      // 5. Return the JSON data (e.g., { predicted_class: "drilling" })
-      return response.data;
 
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return await response.json();
     } catch (error) {
-      console.error('Failed to upload audio:', error);
+      console.error('Failed to send prediction:', error);
       throw error;
     }
   }
 
-  // --- (Keeping mock route for now) ---
-  async getRoute(start: string, end: string, quiet: boolean = false): Promise<RouteData> {
-    console.warn("getRoute is still using mock data.");
+  // ── Test endpoint connectivity ──
+  async testConnection(endpoint: string): Promise<boolean> {
     try {
-      return new Promise((resolve) => {
-        setTimeout(() => {
-          const mockRoute: RouteData = {
-            coordinates: [
-              { lat: 40.7128, lng: -74.0060 },
-              { lat: 40.7589, lng: -73.9851 },
-            ],
-            distance: quiet ? '2.8 km' : '2.3 km',
-            duration: quiet ? '12 min' : '8 min',
-            isQuiet: quiet
-          };
-          resolve(mockRoute);
-        }, 500);
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
       });
-    } catch (error) {
-      console.error('Failed to get route:', error);
-      throw error;
+      return response.ok;
+    } catch {
+      return false;
     }
   }
 
-  // --- (Keeping mock test for now) ---
-  async testConnection(): Promise<boolean> {
-    // You could replace this with a real call to a /health endpoint
-    console.warn("testConnection is still using mock data.");
-    return new Promise((resolve) => setTimeout(() => resolve(true), 500));
+  // ── Polling ──
+  startPolling(callback: (data: NoiseRecord[]) => void): void {
+    this.stopPolling();
+
+    // Immediate first fetch
+    this.fetchNoiseData()
+      .then(callback)
+      .catch(() => {});
+
+    this.pollingTimer = setInterval(async () => {
+      try {
+        const data = await this.fetchNoiseData();
+        callback(data);
+      } catch {
+        // Silently continue polling on failure
+      }
+    }, this.config.pollingInterval);
+  }
+
+  stopPolling(): void {
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer);
+      this.pollingTimer = null;
+    }
+  }
+
+  isPolling(): boolean {
+    return this.pollingTimer !== null;
   }
 }
 

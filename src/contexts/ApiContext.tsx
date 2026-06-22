@@ -1,10 +1,18 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { ApiConfig } from '../types';
+import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { NoiseRecord, ApiConfig } from '../types';
+import { apiService } from '../services/api';
 
 interface ApiContextType {
   config: ApiConfig;
-  updateConfig: (config: ApiConfig) => void;
-  isConfigured: boolean;
+  updateConfig: (config: Partial<ApiConfig>) => void;
+  noiseData: NoiseRecord[];
+  isPolling: boolean;
+  lastUpdated: Date | null;
+  error: string | null;
+  startPolling: () => void;
+  stopPolling: () => void;
+  refreshData: () => Promise<void>;
+  addLocalRecord: (record: NoiseRecord) => void;
 }
 
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
@@ -17,32 +25,111 @@ export const useApi = () => {
   return context;
 };
 
-export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const ApiProvider = ({ children }: { children: ReactNode }) => {
   const [config, setConfig] = useState<ApiConfig>(() => {
-    const saved = localStorage.getItem('apiConfig');
-    return saved ? JSON.parse(saved) : { baseUrl: '', apiKey: '' };
+    const defaultEnvKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+    const saved = localStorage.getItem('urbanNoiseConfig');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        // If local storage has no key, inject the .env key
+        if (!parsed.googleMapsApiKey) {
+          parsed.googleMapsApiKey = defaultEnvKey;
+        }
+        return parsed;
+      } catch {
+        // Fall through to defaults
+      }
+    }
+    return {
+      readEndpoint: '',
+      predictEndpoint: 'https://hnwl6n3tq1.execute-api.us-east-2.amazonaws.com/dev/predict',
+      pollingInterval: 30000,
+      googleMapsApiKey: defaultEnvKey,
+    };
   });
 
-  const updateConfig = (newConfig: ApiConfig) => {
-    setConfig(newConfig);
-    localStorage.setItem('apiConfig', JSON.stringify(newConfig));
-  };
+  const [noiseData, setNoiseData] = useState<NoiseRecord[]>([]);
+  const [isPolling, setIsPolling] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const isConfigured = config.baseUrl && config.apiKey;
-
+  // Sync config to apiService and localStorage
   useEffect(() => {
-    // Set default mock API config for development
-    if (!isConfigured) {
-      const mockConfig = {
-        baseUrl: 'https://api.urbannoise.demo',
-        apiKey: 'demo-key-12345'
-      };
-      updateConfig(mockConfig);
+    apiService.setConfig(config);
+    localStorage.setItem('urbanNoiseConfig', JSON.stringify(config));
+  }, [config]);
+
+  const updateConfig = useCallback((partial: Partial<ApiConfig>) => {
+    setConfig(prev => ({ ...prev, ...partial }));
+  }, []);
+
+  const handleDataUpdate = useCallback((data: NoiseRecord[]) => {
+    setNoiseData(data);
+    setLastUpdated(new Date());
+    setError(null);
+  }, []);
+
+  const addLocalRecord = useCallback((record: NoiseRecord) => {
+    setNoiseData(prev => {
+      // Check if it already exists based on event_id, otherwise append
+      if (prev.some(r => r.event_id === record.event_id)) {
+        return prev;
+      }
+      return [record, ...prev];
+    });
+    setLastUpdated(new Date());
+  }, []);
+
+  const startPolling = useCallback(() => {
+    if (!config.readEndpoint) {
+      setError('Configure a DynamoDB read endpoint in Admin to start polling.');
+      return;
     }
-  }, [isConfigured]);
+    apiService.startPolling(handleDataUpdate);
+    setIsPolling(true);
+    setError(null);
+  }, [config.readEndpoint, handleDataUpdate]);
+
+  const stopPolling = useCallback(() => {
+    apiService.stopPolling();
+    setIsPolling(false);
+  }, []);
+
+  const refreshData = useCallback(async () => {
+    try {
+      const data = await apiService.fetchNoiseData();
+      handleDataUpdate(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch data');
+    }
+  }, [handleDataUpdate]);
+
+  // Auto-start polling if endpoint is configured
+  useEffect(() => {
+    if (config.readEndpoint) {
+      startPolling();
+    }
+    return () => {
+      apiService.stopPolling();
+    };
+  }, [config.readEndpoint, config.pollingInterval, startPolling]);
 
   return (
-    <ApiContext.Provider value={{ config, updateConfig, isConfigured }}>
+    <ApiContext.Provider
+      value={{
+        config,
+        updateConfig,
+        noiseData,
+        isPolling,
+        lastUpdated,
+        error,
+        startPolling,
+        stopPolling,
+        refreshData,
+        addLocalRecord,
+      }}
+    >
       {children}
     </ApiContext.Provider>
   );

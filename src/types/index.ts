@@ -1,30 +1,18 @@
-export interface NoiseData {
-  id: string;
-  lat: number;
-  lng: number;
+// Matches DynamoDB table schema
+export interface NoiseRecord {
+  node_id: string;
   timestamp: string;
-  label: string;
-  noise_level: number;
   confidence: number;
-  audio_url?: string;
-}
-
-export interface RouteData {
-  coordinates: { lat: number; lng: number }[];
-  distance: string;
-  duration: string;
-  isQuiet?: boolean;
-}
-
-export interface UploadResponse {
-  id: string;
+  event_id: string;
   label: string;
-  confidence: number;
-  noise_level: number;
-  message: string;
+  lat: number;
+  lon: number;
 }
 
+// API configuration for Admin panel
 export interface ApiConfig {
-  baseUrl: string;
-  apiKey: string;
+  readEndpoint: string;    // GET endpoint to read noise data from DynamoDB
+  predictEndpoint: string; // POST endpoint for audio prediction (ESP32 + browser)
+  pollingInterval: number; // Polling interval in ms
+  googleMapsApiKey: string; // Google Maps API key
 }
