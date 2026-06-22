@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApi } from '../contexts/ApiContext';
 import { NoiseRecord } from '../types';
 import { createHeatmapOverlay, HeatmapOverlay } from '../lib/heatmapOverlay';
+import { disturbanceFor } from '../lib/disturbance';
 import './MapStyles.css';
 
 // VIT Chennai campus — default center
@@ -116,14 +117,16 @@ const MapComponent = () => {
       );
 
       // ── Heatmap overlay (custom canvas — HeatmapLayer was removed in v3.65) ──
-      const heatPoints = validData.map(point => ({
-        lat: point.lat,
-        lng: point.lon,
-        weight: normalizeConfidence(point.confidence),
-      }));
+      // Color + weight come from the DISTURBANCE band of the sound (red/yellow/
+      // green), not from model confidence. Drilling/horn glow red, dog/siren
+      // amber, street music green.
+      const heatPoints = validData.map(point => {
+        const d = disturbanceFor(point.label);
+        return { lat: point.lat, lng: point.lon, weight: d.weight, color: d.rgb };
+      });
 
       if (!heatmapRef.current) {
-        heatmapRef.current = createHeatmapOverlay(heatPoints, { radius: 40, opacity: 0.75 });
+        heatmapRef.current = createHeatmapOverlay(heatPoints, { radius: 80, opacity: 0.6 });
         heatmapRef.current.setMap(googleMapRef.current);
       } else {
         heatmapRef.current.setPoints(heatPoints);
@@ -141,8 +144,8 @@ const MapComponent = () => {
             icon: {
               path: google.maps.SymbolPath.CIRCLE,
               scale: 7,
-              fillColor: getColor(normalizeConfidence(point.confidence)),
-              fillOpacity: 0.85,
+              fillColor: disturbanceFor(point.label).hex,
+              fillOpacity: 0.9,
               strokeColor: '#fff',
               strokeWeight: 2,
             },
@@ -207,21 +210,21 @@ const MapComponent = () => {
       <div className="relative">
         <div ref={mapRef} className="map-container" style={{ height: '500px', width: '100%' }} />
 
-        {/* Legend */}
+        {/* Legend — disturbance level (not confidence) */}
         <div className="absolute bottom-4 left-4 bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-3">
-          <h4 className="font-semibold text-gray-900 text-sm mb-2">Confidence</h4>
+          <h4 className="font-semibold text-gray-900 text-sm mb-2">Disturbance Level</h4>
           <div className="space-y-1">
             <div className="flex items-center space-x-2">
-              <div className="w-3 h-3 rounded-full bg-green-500"></div>
-              <span className="text-xs text-gray-700">High (&gt;0.8)</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-              <span className="text-xs text-gray-700">Medium (0.5–0.8)</span>
-            </div>
-            <div className="flex items-center space-x-2">
               <div className="w-3 h-3 rounded-full bg-red-500"></div>
-              <span className="text-xs text-gray-700">Low (&lt;0.5)</span>
+              <span className="text-xs text-gray-700">High — drilling, horn, gun shot</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className="w-3 h-3 rounded-full bg-amber-500"></div>
+              <span className="text-xs text-gray-700">Moderate — dog bark, siren, engine</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className="w-3 h-3 rounded-full bg-emerald-500"></div>
+              <span className="text-xs text-gray-700">Low — street music, ambient</span>
             </div>
           </div>
         </div>
@@ -252,8 +255,13 @@ const MapComponent = () => {
               <div className="font-medium">{selectedPoint.label}</div>
             </div>
             <div>
-              <div className="text-gray-500">Node ID</div>
-              <div className="font-medium font-mono text-xs">{selectedPoint.node_id}</div>
+              <div className="text-gray-500">Disturbance</div>
+              <div
+                className="font-medium inline-flex items-center px-2 py-0.5 rounded-full text-xs text-white"
+                style={{ backgroundColor: disturbanceFor(selectedPoint.label).hex }}
+              >
+                {disturbanceFor(selectedPoint.label).text}
+              </div>
             </div>
             <div>
               <div className="text-gray-500">Confidence</div>
@@ -269,19 +277,5 @@ const MapComponent = () => {
     </div>
   );
 };
-
-// The /dashboard API may return confidence as a percentage (0–100) or a
-// fraction (0–1). Normalize everything the map consumes to a 0–1 fraction.
-function normalizeConfidence(confidence: number): number {
-  const c = Number(confidence);
-  if (!isFinite(c) || c <= 0) return 0.5;
-  return c > 1 ? Math.min(c / 100, 1) : c;
-}
-
-function getColor(confidence: number): string {
-  if (confidence > 0.8) return '#10B981';
-  if (confidence > 0.5) return '#F59E0B';
-  return '#EF4444';
-}
 
 export default MapComponent;
